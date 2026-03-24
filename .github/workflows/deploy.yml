@@ -46,3 +46,46 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy-to-server:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to remote server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            # Остановка текущего контейнера
+            docker stop fastapi-time-server || true
+            docker rm fastapi-time-server || true
+            
+            # Удаление старого образа
+            docker rmi ghcr.io/${{ github.repository }}:latest || true
+            
+            # Вход в GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Загрузка нового образа
+            docker pull ghcr.io/${{ github.repository }}:latest
+            
+            # Запуск нового контейнера
+            docker run -d \
+              --name fastapi-time-server \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              ghcr.io/${{ github.repository }}:latest
+            
+            # Очистка системы Docker
+            docker system prune -f
+            
+            # Проверка статуса контейнера
+            docker ps | grep fastapi-time-server
