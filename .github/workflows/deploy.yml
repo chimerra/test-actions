@@ -3,7 +3,10 @@ name: Build and Deploy to GitHub Container Registry
 on:
   push:
     branches:
-      - main
+      - develop
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-push:
@@ -14,21 +17,21 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -38,7 +41,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -46,3 +49,46 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy-to-server:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Deploy to remote server via SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            # Остановка текущего контейнера
+            docker stop fastapi-time-server || true
+            docker rm fastapi-time-server || true
+            
+            # Удаление старого образа
+            docker rmi ghcr.io/${{ github.repository }}:latest || true
+            
+            # Вход в GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Загрузка нового образа
+            docker pull ghcr.io/${{ github.repository }}:latest
+            
+            # Запуск нового контейнера
+            docker run -d \
+              --name fastapi-time-server \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              ghcr.io/${{ github.repository }}:latest
+            
+            # Очистка системы Docker
+            docker system prune -f
+            
+            # Проверка статуса контейнера
+            docker ps | grep fastapi-time-server
